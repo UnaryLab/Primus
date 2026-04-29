@@ -20,22 +20,25 @@ class Attention(TTAttention):
         attention_masks: AttentionMasksType | None,
     ):
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        with torch.autograd.profiler.record_function("q_ip"):
+            xq = self.wq(x)
+        with torch.autograd.profiler.record_function("k_ip"):
+            xk = self.wk(x)
+        with torch.autograd.profiler.record_function("v_ip"):
+            xv = self.wv(x)
 
-        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
-        # local heads from sizes of xq, xk, and xv as TP may have sharded them
-        # after the above linear ops.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        with torch.autograd.profiler.record_function("qkv_t"):
+            xq = xq.view(bs, seqlen, -1, self.head_dim)
+            xk = xk.view(bs, seqlen, -1, self.head_dim)
+            xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        with torch.autograd.profiler.record_function("qkv_re"):
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        # xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        with torch.autograd.profiler.record_function("attn_fa"):
+            output = self.inner_attention(xq, xk, xv)
 
-        output = self.inner_attention(xq, xk, xv)
-
-        output = output.contiguous().view(bs, seqlen, -1)
-        return self.wo(output)
+        with torch.autograd.profiler.record_function("attn_or"):
+            output = output.contiguous().view(bs, seqlen, -1)
+        with torch.autograd.profiler.record_function("attn_op"):
+            return self.wo(output)
